@@ -19,4 +19,4 @@ A simple and easy-to-use lag switch designed exclusively for Roblox.
 - **Simple mode is the primary feature** – Advanced mode is not recommended.
 - **No further updates** – This project will not receive any future patches or improvements.
 
-Enjoy using the lag switch responsibly!
+Enjoy using the lag switch!
