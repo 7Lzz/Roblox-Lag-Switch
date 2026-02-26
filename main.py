@@ -733,12 +733,14 @@ class RobloxLagSwitch(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        screen = QApplication.primaryScreen()
-        if screen:
-            geo = screen.availableGeometry()
-            x = geo.x() + (geo.width() - self.width()) // 2
-            y = geo.y() + (geo.height() - self.height()) // 2
-            self.move(x, y)
+        if not hasattr(self, '_first_shown'):
+            self._first_shown = True
+            screen = QApplication.primaryScreen()
+            if screen:
+                geo = screen.availableGeometry()
+                x = geo.x() + (geo.width() - self.width()) // 2
+                y = geo.y() + (geo.height() - self.height()) // 2
+                self.move(x, y)
 
     def closeEvent(self, event):
         self.running = False
