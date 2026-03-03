@@ -59,7 +59,7 @@ class Settings:
     def _get_save_directory() -> Path:
         base_dir = Path("C:/Seven's Scripts")
         base_dir.mkdir(exist_ok=True)
-        app_dir = base_dir / "Seven's Lag Switch"
+        app_dir = base_dir / "Lag Switch"
         app_dir.mkdir(exist_ok=True)
         return app_dir
 
@@ -205,10 +205,19 @@ class KeyCaptureButton(QPushButton):
             self.clearFocus()
 
 
+class ToggleEvent(QEvent):
+    EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
+
+    def __init__(self):
+        super().__init__(ToggleEvent.EVENT_TYPE)
+
+
 def resolve_icon_path():
     try:
         if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
             base = sys._MEIPASS
+        elif getattr(sys, 'frozen', False):
+            base = os.path.dirname(sys.executable)
         else:
             base = os.path.dirname(os.path.abspath(__file__))
         path = os.path.join(base, "icons", "icon.ico")
@@ -241,7 +250,7 @@ class RobloxLagSwitch(QWidget):
 
         if sys.platform == 'win32':
             try:
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Sevens.LagSwitch")
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LagSwitch")
             except:
                 pass
 
@@ -262,6 +271,12 @@ class RobloxLagSwitch(QWidget):
 
         if self.settings.start_minimized:
             QTimer.singleShot(100, self.showMinimized)
+
+    def event(self, event):
+        if isinstance(event, ToggleEvent):
+            self.toggle_block()
+            return True
+        return super().event(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -308,7 +323,7 @@ class RobloxLagSwitch(QWidget):
             title_layout.addWidget(icon_label)
             title_layout.addSpacing(8)
 
-        title_text = QLabel("Seven's Lag Switch")
+        title_text = QLabel("Lag Switch")
         title_text.setFont(QFont("Segoe UI", 10, QFont.DemiBold))
         title_text.setStyleSheet("color: white; background: transparent;")
         title_layout.addWidget(title_text)
@@ -710,7 +725,7 @@ class RobloxLagSwitch(QWidget):
         try:
             normalized = self.normalize_key(key)
             if normalized and normalized == self.settings.hotkey:
-                QTimer.singleShot(0, self.toggle_block)
+                QApplication.instance().postEvent(self, ToggleEvent())
         except:
             pass
 
