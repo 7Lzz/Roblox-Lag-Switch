@@ -21,7 +21,6 @@ from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from pynput import keyboard as pynput_keyboard
-from pynput import mouse as pynput_mouse
 
 
 @dataclass
@@ -91,6 +90,7 @@ class Settings:
 class TonePlayer:
     SAMPLE_RATE = 44100
     _temp_dir = None
+    _cache = {}
 
     @classmethod
     def _get_temp_dir(cls):
@@ -102,21 +102,33 @@ class TonePlayer:
     def play(freq, duration_ms, volume_pct):
         if volume_pct <= 0:
             return
+        cache_key = (freq, duration_ms, volume_pct)
+        if cache_key in TonePlayer._cache:
+            temp_path = TonePlayer._cache[cache_key]
+            if os.path.isfile(temp_path):
+                winsound.PlaySound(temp_path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+                return
         try:
             n_samples = int(TonePlayer.SAMPLE_RATE * duration_ms / 1000)
             amplitude = max(0.0, min(1.0, volume_pct / 100.0))
-            samples = bytearray()
+            samples = bytearray(n_samples * 2)
             fade = min(500, n_samples // 4)
+            two_pi_freq = 2.0 * math.pi * freq
+            inv_rate = 1.0 / TonePlayer.SAMPLE_RATE
+            inv_fade = 1.0 / fade if fade > 0 else 1.0
+            fade_out_start = n_samples - fade
             for i in range(n_samples):
-                t = i / TonePlayer.SAMPLE_RATE
-                sample = math.sin(2.0 * math.pi * freq * t)
+                sample = math.sin(two_pi_freq * i * inv_rate)
                 if i < fade:
-                    sample *= i / fade
-                elif i > n_samples - fade:
-                    sample *= (n_samples - i) / fade
+                    sample *= i * inv_fade
+                elif i > fade_out_start:
+                    sample *= (n_samples - i) * inv_fade
                 val = int(sample * amplitude * 32767)
-                val = max(-32768, min(32767, val))
-                samples += struct.pack('<h', val)
+                if val > 32767:
+                    val = 32767
+                elif val < -32768:
+                    val = -32768
+                struct.pack_into('<h', samples, i * 2, val)
 
             temp_path = os.path.join(TonePlayer._get_temp_dir(), f"tone_{freq}_{volume_pct}.wav")
             with wave.open(temp_path, 'wb') as wf:
@@ -125,6 +137,7 @@ class TonePlayer:
                 wf.setframerate(TonePlayer.SAMPLE_RATE)
                 wf.writeframes(bytes(samples))
 
+            TonePlayer._cache[cache_key] = temp_path
             winsound.PlaySound(temp_path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
         except Exception as e:
             print(f"TonePlayer error: {e}")
@@ -240,9 +253,9 @@ class RobloxLagSwitch(QWidget):
         self.unblock_commands = []
         self.offset = None
         self.key_listener = None
-        self.mouse_listener = None
         self.block_timestamp = 0
         self.icon_path = resolve_icon_path()
+        self._paint_path = None
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -263,11 +276,10 @@ class RobloxLagSwitch(QWidget):
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.cache_roblox_processes)
-        self.refresh_timer.start(30000)
+        self.refresh_timer.start(60000)
 
         self.countdown_timer = QTimer(self)
         self.countdown_timer.timeout.connect(self.check_auto_unblock)
-        self.countdown_timer.start(250)
 
         if self.settings.start_minimized:
             QTimer.singleShot(100, self.showMinimized)
@@ -278,14 +290,19 @@ class RobloxLagSwitch(QWidget):
             return True
         return super().event(event)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._paint_path = None
+
     def paintEvent(self, event):
+        if self._paint_path is None:
+            self._paint_path = QPainterPath()
+            self._paint_path.addRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 10, 10)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 10, 10)
-        painter.fillPath(path, QColor(24, 24, 24))
+        painter.fillPath(self._paint_path, QColor(24, 24, 24))
         painter.setPen(QPen(QColor(70, 70, 70), 0.75))
-        painter.drawPath(path)
+        painter.drawPath(self._paint_path)
         painter.end()
 
     def init_ui(self):
@@ -551,8 +568,17 @@ class RobloxLagSwitch(QWidget):
             self.timer_label.setText("")
             self.timer_label.setStyleSheet("color: #888888; background: transparent;")
 
+    def start_countdown(self):
+        if not self.countdown_timer.isActive():
+            self.countdown_timer.start(250)
+
+    def stop_countdown(self):
+        if self.countdown_timer.isActive():
+            self.countdown_timer.stop()
+
     def check_auto_unblock(self):
         if not self.blocked or not self.settings.auto_reconnect:
+            self.stop_countdown()
             return
         elapsed = time.time() - self.block_timestamp
         remaining = max(0, 9.0 - elapsed)
@@ -560,6 +586,7 @@ class RobloxLagSwitch(QWidget):
             self.timer_label.setText(f"{remaining:.1f}s")
             self.timer_label.setStyleSheet("color: #ffcc00; background: transparent;")
         else:
+            self.stop_countdown()
             self.unblock_all_roblox_fast()
             self.play_beep(600)
 
@@ -568,12 +595,12 @@ class RobloxLagSwitch(QWidget):
         try:
             for proc in psutil.process_iter(['pid', 'name', 'exe']):
                 try:
-                    name = proc.info['name'].lower()
-                    if 'roblox' in name:
+                    name = proc.info['name']
+                    if name and 'roblox' in name.lower():
                         pid = proc.info['pid']
                         exe = proc.info.get('exe', 'Unknown')
                         self.cached_processes[pid] = {
-                            'name': proc.info['name'],
+                            'name': name,
                             'exe': exe,
                             'pid': pid
                         }
@@ -613,60 +640,72 @@ class RobloxLagSwitch(QWidget):
                 continue
             rule_base = f"{self.rule_name_prefix}_{pid}"
             self.block_commands.append(
-                f'netsh advfirewall firewall add rule name="{rule_base}_in" dir=in action=block program="{exe}" enable=yes'
+                ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                 f'name={rule_base}_in', 'dir=in', 'action=block',
+                 f'program={exe}', 'enable=yes']
             )
             self.block_commands.append(
-                f'netsh advfirewall firewall add rule name="{rule_base}_out" dir=out action=block program="{exe}" enable=yes'
+                ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                 f'name={rule_base}_out', 'dir=out', 'action=block',
+                 f'program={exe}', 'enable=yes']
             )
             self.unblock_commands.append(
-                f'netsh advfirewall firewall delete rule name="{rule_base}_in"'
+                ['netsh', 'advfirewall', 'firewall', 'delete', 'rule',
+                 f'name={rule_base}_in']
             )
             self.unblock_commands.append(
-                f'netsh advfirewall firewall delete rule name="{rule_base}_out"'
+                ['netsh', 'advfirewall', 'firewall', 'delete', 'rule',
+                 f'name={rule_base}_out']
             )
+
+    def _run_netsh_batch(self, commands):
+        if not commands:
+            return
+        try:
+            batch_lines = []
+            for cmd in commands:
+                escaped = ' '.join(f'"{c}"' if ' ' in c or '=' in c else c for c in cmd)
+                batch_lines.append(escaped)
+            batch_content = " & ".join(batch_lines)
+            subprocess.Popen(
+                batch_content,
+                shell=True,
+                creationflags=CREATE_NO_WINDOW,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            ).wait()
+        except:
+            pass
 
     def block_selected_roblox_fast(self):
         if not self.block_commands:
             self.prepare_firewall_rules()
         if not self.block_commands:
             return
-        combined = " & ".join(self.block_commands)
-        try:
-            subprocess.run(combined, shell=True, creationflags=CREATE_NO_WINDOW,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.blocked = True
-            self.block_timestamp = time.time()
-            self.update_status()
-        except:
-            pass
+        self._run_netsh_batch(self.block_commands)
+        self.blocked = True
+        self.block_timestamp = time.time()
+        self.update_status()
+        if self.settings.auto_reconnect:
+            self.start_countdown()
 
     def unblock_all_roblox_fast(self):
+        self.stop_countdown()
         if not self.unblock_commands:
-            try:
-                subprocess.run(
-                    f'netsh advfirewall firewall delete rule name="{self.rule_name_prefix}" >nul 2>&1',
-                    shell=True, creationflags=CREATE_NO_WINDOW,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            except:
-                pass
             cleanup = []
             for pid in list(self.cached_processes.keys()):
                 rule_base = f"{self.rule_name_prefix}_{pid}"
-                cleanup.append(f'netsh advfirewall firewall delete rule name="{rule_base}_in"')
-                cleanup.append(f'netsh advfirewall firewall delete rule name="{rule_base}_out"')
-            if cleanup:
-                try:
-                    subprocess.run(" & ".join(cleanup), shell=True, creationflags=CREATE_NO_WINDOW,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except:
-                    pass
+                cleanup.append(
+                    ['netsh', 'advfirewall', 'firewall', 'delete', 'rule',
+                     f'name={rule_base}_in']
+                )
+                cleanup.append(
+                    ['netsh', 'advfirewall', 'firewall', 'delete', 'rule',
+                     f'name={rule_base}_out']
+                )
+            self._run_netsh_batch(cleanup)
         else:
-            try:
-                subprocess.run(" & ".join(self.unblock_commands), shell=True, creationflags=CREATE_NO_WINDOW,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except:
-                pass
+            self._run_netsh_batch(self.unblock_commands)
         self.blocked = False
         self.block_timestamp = 0
         self.update_status()
@@ -675,9 +714,7 @@ class RobloxLagSwitch(QWidget):
         if not self.settings.beep or self.settings.beep_volume <= 0:
             return
         vol = self.settings.beep_volume
-        def _play():
-            TonePlayer.play(freq, 50, vol)
-        threading.Thread(target=_play, daemon=True).start()
+        threading.Thread(target=TonePlayer.play, args=(freq, 50, vol), daemon=True).start()
 
     def toggle_block(self):
         try:
@@ -732,8 +769,6 @@ class RobloxLagSwitch(QWidget):
     def start_listeners(self):
         self.key_listener = pynput_keyboard.Listener(on_press=self.on_key_press)
         self.key_listener.start()
-        self.mouse_listener = pynput_mouse.Listener()
-        self.mouse_listener.start()
 
     def title_press(self, event):
         if event.button() == Qt.LeftButton:
@@ -759,12 +794,11 @@ class RobloxLagSwitch(QWidget):
 
     def closeEvent(self, event):
         self.running = False
+        self.stop_countdown()
         if self.blocked:
             self.unblock_all_roblox_fast()
         if self.key_listener:
             self.key_listener.stop()
-        if self.mouse_listener:
-            self.mouse_listener.stop()
         try:
             import shutil
             if TonePlayer._temp_dir and os.path.isdir(TonePlayer._temp_dir):
@@ -789,9 +823,19 @@ def main():
         window.show()
         return app.exec_()
     else:
-        ctypes.windll.shell32.ShellExecuteW(None, 'runas', sys.executable, __file__, None, 1)
+        exe = sys.executable
+        ctypes.windll.shell32.ShellExecuteW(None, 'runas', exe, '', None, 1)
         return 0
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:
+        crash_log = Path("C:/Seven's Scripts/Lag Switch/crash.log")
+        crash_log.parent.mkdir(parents=True, exist_ok=True)
+        import traceback
+        with open(crash_log, 'w') as f:
+            f.write(f"{datetime.now()}\n")
+            f.write(traceback.format_exc())
+        sys.exit(1)
