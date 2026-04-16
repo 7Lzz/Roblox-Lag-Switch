@@ -30,7 +30,7 @@ A simple and clean lag switch designed exclusively for Roblox.
 
 ```
 pip install pyqt5 psutil pynput pywin32
-python lag_switch.py
+python main.py
 ```
 
 ## Notes
